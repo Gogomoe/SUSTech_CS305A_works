@@ -1,8 +1,12 @@
-from dns.resolver import query, Answer
+from collections import defaultdict
+
+from dns.resolver import query, Answer, NoAnswer
 import asyncio
-from typing import Tuple, List
+from typing import Tuple, List, Dict
 import struct
 import ipaddress
+from datetime import datetime
+import copy
 
 from enum import Enum, unique
 
@@ -69,6 +73,12 @@ class DNSQuestion:
     def __str__(self):
         return '<DNSQuestion {}>'.format(str(self.__dict__))
 
+    def __hash__(self):
+        return hash((self.domain, self.qtype, self.qclass))
+
+    def __eq__(self, other):
+        return (self.domain, self.qtype, self.qclass) == (other.domain, other.qtype, other.qclass)
+
 
 class ResourceRecord:
     def __init__(self, name_bytes: bytes, qtype: QType, qclass: QClass, ttl: int, data: bytes):
@@ -125,12 +135,40 @@ def parse_question(offset: int, body: bytes) -> Tuple[int, DNSQuestion]:
     return offset, res
 
 
-def handle(question: DNSQuestion) -> List[ResourceRecord]:
-    # TODO cache
-    # TODO try no answer
-    answer: Answer = query(question.domain, question.qtype.value, question.qclass.value)
+cache: Dict[DNSQuestion, List[Tuple[int, ResourceRecord]]] = defaultdict(list)
 
-    list = []
+
+def handle(question: DNSQuestion) -> List[ResourceRecord]:
+    now = int(datetime.now().timestamp())
+
+    should_send_query = len(cache[question]) == 0
+    should_send_query = should_send_query or any(now - time >= record.ttl for time, record in cache[question])
+
+    if should_send_query:
+        print("There are {} records in cache. Now should update cache".format(len(cache[question])))
+        cache[question].extend([(now, record) for record in send_query(question)])
+
+    cache[question] = list(filter(lambda item: now - item[0] < item[1].ttl, cache[question]))
+
+    result = []
+    for time, record in cache[question]:
+        record_copy = copy.deepcopy(record)
+        record_copy.ttl -= now - time
+        result.append(record_copy)
+
+    return result
+
+
+def send_query(question: DNSQuestion) -> List[ResourceRecord]:
+    print("Updating records")
+    answer: Answer
+    try:
+        answer = query(question.domain, question.qtype.value, question.qclass.value)
+    except NoAnswer:
+        print("NoAnswer")
+        return []
+
+    result = []
     for it in answer.response.answer:
 
         def label_to_bytes(labels: Tuple[bytes]) -> bytes:
@@ -158,19 +196,22 @@ def handle(question: DNSQuestion) -> List[ResourceRecord]:
                 data = int.to_bytes(item.preference, 2, byteorder='big')
                 data += label_to_bytes(item.exchange.labels)
             elif qtype == QType.TXT:
-                ## TODO
+                data = b''
+                for string in item.strings:
+                    data += int.to_bytes(len(string), 1, byteorder='big')
+                    data += string
                 pass
             elif qtype == QType.AAAA:
                 data = ipaddress.ip_address(item.address).packed
 
             rdata = ResourceRecord(name_bytes, qtype, qclass, ttl, data)
-            list.append(rdata)
+            result.append(rdata)
 
-    return list
+    return result
 
 
-def write(header: DNSHeader, questions_bytes: bytes,
-          questions: List[DNSQuestion], responds: List[ResourceRecord]) -> bytes:
+def write(header: DNSHeader, questions_bytes: bytes, questions: List[DNSQuestion],
+          responds: List[ResourceRecord]) -> bytes:
     data = b''
     data += header.data[0:2]
     data += int.to_bytes(header.data[2] | 0x80, 1, byteorder='big')
