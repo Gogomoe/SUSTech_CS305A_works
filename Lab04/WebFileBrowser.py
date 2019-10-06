@@ -29,7 +29,7 @@ async def dispatch(reader: StreamReader, writer: StreamWriter):
     # otherwise, my program may throw exception and cannot sever correctly
     data = await reader.read(128 * 1024)
     request = decode_request(data)
-    method, uri, header = request
+    method, uri, query, header = request
 
     if method != 'GET' and method != 'HEAD':
         await write(err405, writer)
@@ -45,9 +45,17 @@ async def dispatch(reader: StreamReader, writer: StreamWriter):
         await handleFile(request, writer)
 
 
-def decode_request(data: bytes) -> Tuple[str, str, Dict[str, str]]:
+def decode_request(data: bytes) -> Tuple[str, str, str, Dict[str, str]]:
     data = data.decode().split('\r\n')
+    method: str
+    uri: str
     method, uri, _ = data[0].split()
+
+    query: str = ''
+    if '?' in uri:
+        index = uri.index('?')
+        query = uri[index + 1:]
+        uri = uri[:index]
 
     header = {}
 
@@ -62,7 +70,7 @@ def decode_request(data: bytes) -> Tuple[str, str, Dict[str, str]]:
         value: str = line[index + 1:]
         header[name.strip().lower()] = value.strip()
 
-    return method, uri, header
+    return method, uri, query, header
 
 
 async def write(data: bytes, writer: StreamWriter):
@@ -71,8 +79,8 @@ async def write(data: bytes, writer: StreamWriter):
     writer.close()
 
 
-async def handleDir(request: Tuple[str, str, Dict[str, str]], writer: StreamWriter):
-    method, uri, header = request
+async def handleDir(request: Tuple[str, str, str, Dict[str, str]], writer: StreamWriter):
+    method, uri, query, header = request
 
     rel_uri = uri[1:] if uri[0] == '/' else uri
     unquote_uri = unquote(rel_uri)
@@ -109,8 +117,8 @@ async def handleDir(request: Tuple[str, str, Dict[str, str]], writer: StreamWrit
     await write(data, writer)
 
 
-async def handleFile(request: Tuple[str, str, Dict[str, str]], writer: StreamWriter):
-    method, uri, header = request
+async def handleFile(request: Tuple[str, str, str, Dict[str, str]], writer: StreamWriter):
+    method, uri, query, header = request
 
     rel_uri = uri[1:] if uri[0] == '/' else uri
     unquote_uri = unquote(rel_uri)
