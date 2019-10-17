@@ -23,6 +23,9 @@ err405 = [b'HTTP/1.0 405 Method Not Allowed\r\n'
 # the root dir map to web page
 mappingDir = "../"
 
+Request = Tuple[str, str, str, Dict[str, str]]
+Respond = Tuple[Tuple[int, str], Dict[str, str], bytes]
+
 
 class Server(threading.Thread):
     def __init__(self, conn: socket.socket, address: Tuple[str, int]):
@@ -49,7 +52,7 @@ class Server(threading.Thread):
             handleFile(request, self.conn)
 
 
-def decode_request(data: bytes) -> Tuple[str, str, str, Dict[str, str]]:
+def decode_request(data: bytes) -> Request:
     data = data.decode().split('\r\n')
     method: str
     uri: str
@@ -82,7 +85,7 @@ def write(data: bytes, conn: socket.socket):
     conn.close()
 
 
-def handleDir(request: Tuple[str, str, str, Dict[str, str]], conn: socket):
+def handleDir(request: Request, conn: socket):
     method, uri, query, header = request
 
     rel_uri = uri[1:] if uri[0] == '/' else uri
@@ -120,7 +123,7 @@ def handleDir(request: Tuple[str, str, str, Dict[str, str]], conn: socket):
     write(data, conn)
 
 
-def handleFile(request: Tuple[str, str, str, Dict[str, str]], conn: socket):
+def handleFile(request: Request, conn: socket):
     method, uri, query, header = request
 
     rel_uri = uri[1:] if uri[0] == '/' else uri
@@ -136,59 +139,76 @@ def handleFile(request: Tuple[str, str, str, Dict[str, str]], conn: socket):
 
     file_size = os.path.getsize(path)
 
-    respond_status = (200, "OK")
-    respond_header = {}
-    respond_header['Connection'] = 'close'
-    respond_header['Content-Type'] = mine_type
-    respond_header['Content-Length'] = file_size
+    respond: Respond = ((200, "OK"), {}, b'')
+
+    respond[1]['Connection'] = 'close'
+    respond[1]['Content-Type'] = mine_type
+    respond[1]['Content-Length'] = str(file_size)
 
     if method == "HEAD":
-        write(make_data(respond_status, respond_header, b''), conn)
+        write(make_data(respond), conn)
         return
 
     file = open(path, 'rb')
     body = file.read()
     file.close()
 
-    # TODO refactor and add auto range for big file
-    if 'range' in header:
-        range = header['range']
-        start_pos = range.index('=')
-        end_pos = range.index('-')
+    respond = (respond[0], respond[1], body)
 
+    respond = handleRange(request, respond)
+
+    write(make_data(respond), conn)
+
+# TODO and add auto range for big file
+def handleRange(request: Request, respond: Respond) -> Respond:
+    class RangeException(Exception):
+        pass
+
+    method, uri, query, header = request
+    respond_status, respond_header, body = respond
+    file_size = len(body)
+
+    if 'range' not in header:
+        return respond
+    range = header['range']
+    start_pos = range.index('=')
+    end_pos = range.index('-')
+
+    try:
         if '-' == range[-1]:
             range_from = int(range[start_pos + 1:end_pos])
             if range_from < 0:
-                respond_status = (416, 'Requested Range Not Satisfiable')
-                respond_header['Content-Length'] = '0'
-                respond_header['Content-Range'] = 'bytes */{}'.format(str(file_size))
-                body = b''
-            else:
-                respond_status = (206, 'Partial Content')
-                respond_header['Content-Range'] = 'bytes {}-{}/{}'.format(str(range_from), str(file_size - 1),
-                                                                          str(file_size))
-                respond_header['Content-Length'] = str(file_size - range_from)
-                body = body[range_from:]
+                raise RangeException()
+
+            respond_status = (206, 'Partial Content')
+            respond_header['Content-Range'] = 'bytes {}-{}/{}'.format(str(range_from), str(file_size - 1),
+                                                                      str(file_size))
+            respond_header['Content-Length'] = str(file_size - range_from)
+            body = body[range_from:]
+
         else:
             range_from = int(range[start_pos + 1:end_pos])
             range_to = int(range[end_pos + 1:])
             if range_from < 0 or range_from > range_to or range_to >= file_size:
-                respond_status = (416, 'Requested Range Not Satisfiable')
-                respond_header['Content-Length'] = '0'
-                respond_header['Content-Range'] = 'bytes */{}'.format(str(file_size))
-                body = b''
-            else:
-                respond_status = (206, 'Partial Content')
-                respond_header['Content-Range'] = 'bytes {}-{}/{}'.format(str(range_from), str(range_to),
-                                                                          str(file_size))
-                respond_header['Content-Length'] = str(range_to - range_from + 1)
-                body = body[range_from:range_to + 1]
+                raise RangeException()
 
-    write(make_data(respond_status, respond_header, body), conn)
+            respond_status = (206, 'Partial Content')
+            respond_header['Content-Range'] = 'bytes {}-{}/{}'.format(str(range_from), str(range_to),
+                                                                      str(file_size))
+            respond_header['Content-Length'] = str(range_to - range_from + 1)
+            body = body[range_from:range_to + 1]
+
+    except RangeException:
+        respond_status = (416, 'Requested Range Not Satisfiable')
+        respond_header['Content-Length'] = '0'
+        respond_header['Content-Range'] = 'bytes */{}'.format(str(file_size))
+        body = b''
+
+    return respond_status, respond_header, body
 
 
-def make_data(status: Tuple[int, str], header: Dict[str, str], body: bytes) -> bytes:
-    (status_code, status_str) = status
+def make_data(respond: Respond) -> bytes:
+    (status_code, status_str), header, body = respond
     data = 'HTTP/1.0 {} {}\r\n'.format(str(status_code), status_str).encode('utf-8')
     for k, v in header.items():
         data += '{}: {}\r\n'.format(k, v).encode('utf-8')
