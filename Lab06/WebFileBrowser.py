@@ -34,7 +34,7 @@ class Server(threading.Thread):
         self.address = address
 
     def run(self):
-        data = self.conn.recv(128 * 1024)
+        data = self.conn.recv(1024 * 1024)
         request = decode_request(data)
         method, uri, query, header = request
 
@@ -159,6 +159,7 @@ def handleFile(request: Request, conn: socket):
 
     write(make_data(respond), conn)
 
+
 # TODO and add auto range for big file
 def handleRange(request: Request, respond: Respond) -> Respond:
     class RangeException(Exception):
@@ -168,23 +169,38 @@ def handleRange(request: Request, respond: Respond) -> Respond:
     respond_status, respond_header, body = respond
     file_size = len(body)
 
-    if 'range' not in header:
+    if 'range' not in header and len(body) <= 1024 * 1024:
         return respond
-    range = header['range']
-    start_pos = range.index('=')
-    end_pos = range.index('-')
+
+    if 'range' not in header and len(body) > 1024 * 1024:
+        range_from = 0
+        range_to = 1024 * 1024 - 1
+
+        respond_status = (206, 'Partial Content')
+        respond_header['Content-Range'] = 'bytes {}-{}/{}'.format(str(range_from), str(range_to),
+                                                                  str(file_size))
+        respond_header['Content-Length'] = str(range_to - range_from + 1)
+        body = body[range_from:range_to + 1]
+        return respond_status, respond_header, body
 
     try:
+        range = header['range']
+        start_pos = range.index('=')
+        end_pos = range.index('-')
         if '-' == range[-1]:
             range_from = int(range[start_pos + 1:end_pos])
             if range_from < 0:
                 raise RangeException()
 
+            range_to = file_size - 1
+            if range_to - range_from + 1 > 4 * 1024 * 1024:
+                range_to = range_from + 4 * 1024 * 1024 - 1
+
             respond_status = (206, 'Partial Content')
-            respond_header['Content-Range'] = 'bytes {}-{}/{}'.format(str(range_from), str(file_size - 1),
+            respond_header['Content-Range'] = 'bytes {}-{}/{}'.format(str(range_from), str(range_to),
                                                                       str(file_size))
-            respond_header['Content-Length'] = str(file_size - range_from)
-            body = body[range_from:]
+            respond_header['Content-Length'] = str(range_to - range_from + 1)
+            body = body[range_from:range_to + 1]
 
         else:
             range_from = int(range[start_pos + 1:end_pos])
