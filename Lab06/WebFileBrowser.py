@@ -3,7 +3,7 @@ import os
 import threading
 from mimetypes import MimeTypes
 from urllib.parse import unquote
-from typing import Tuple, Any
+from typing import Tuple, Any, List
 from typing import Dict
 
 err404 = [b'HTTP/1.0 404 Not Found\r\n'
@@ -34,7 +34,7 @@ class Server(threading.Thread):
         self.address = address
 
     def run(self):
-        data = self.conn.recv(1024 * 1024)
+        data = self.conn.recv(10 * 1024 * 1024)
         request = decode_request(data)
         method, uri, query, header = request
 
@@ -92,35 +92,53 @@ def handleDir(request: Request, conn: socket):
     unquote_uri = unquote(rel_uri)
     path = os.path.join(mappingDir, unquote_uri)
 
-    data = b'HTTP/1.0 200 OK\r\n'
-    data += b'Connection: close\r\n'
-    data += b'Content-Type: text/html; charset=utf-8\r\n'
-    data += b'\r\n'
+    respond: Respond = ((200, "OK"), {}, b'')
+
+    respond[1]['Connection'] = 'close'
+    respond[1]['Content-Type'] = 'text/html; charset=utf-8'
 
     if method == "HEAD":
-        write(data, conn)
+        write(make_data(respond), conn)
         return
 
-    data += b'<html>\r\n'
-    data += '<head><title>Index of /{}</title></head>\r\n'.format(unquote_uri).encode('utf-8')
-    data += b'<body bgcolor="white">\r\n'
-    data += '<h1>Index of /{}</h1><hr><pre>\r\n'.format(unquote_uri).encode('utf-8')
+    if uri == '/' and 'cookie' in header and 'referer' not in header:
+        cookie = header['cookie']
+        cookies = list(map(lambda it: it.strip(), cookie.split(';')))
+        cookies = list(map(lambda it: (it.split('=')[0], it.split('=')[1]), cookies))
+        visit_list: List[Tuple[str, str]] = list(filter(lambda it: it[0] == 'visit', cookies))
+        if len(visit_list) != 0:
+            visit: str = visit_list[0][1]
+            if visit != '/':
+                respond_status = (302, 'Found')
+                respond[1]['Location'] = visit
+                write(make_data((respond_status, respond[1], respond[2])), conn)
+                return
+
+    respond[1]['Set-Cookie'] = 'visit={}; path=/'.format(uri)
+
+    body = b''
+    body += b'<html>\r\n'
+    body += '<head><title>Index of /{}</title></head>\r\n'.format(unquote_uri).encode('utf-8')
+    body += b'<body bgcolor="white">\r\n'
+    body += '<h1>Index of /{}</h1><hr><pre>\r\n'.format(unquote_uri).encode('utf-8')
 
     if uri == '/':
-        data += '<a href="/">..</a>\r\n'.encode('utf-8')
+        body += '<a href="/">..</a>\r\n'.encode('utf-8')
     else:
-        data += '<a href="../">..</a>\r\n'.encode('utf-8')
+        body += '<a href="../">..</a>\r\n'.encode('utf-8')
 
     for it in os.listdir(path):
         abs_path = os.path.join(path, it)
         if os.path.isdir(abs_path):
             it += '/'
-        data += '<a href="{}">{}</a>\r\n'.format(it, it).encode('utf-8')
+        body += '<a href="{}">{}</a>\r\n'.format(it, it).encode('utf-8')
 
-    data += b'</pre><hr></body>\r\n'
-    data += b'</html>\r\n'
+    body += b'</pre><hr></body>\r\n'
+    body += b'</html>\r\n'
 
-    write(data, conn)
+    respond = (respond[0], respond[1], body)
+
+    write(make_data(respond), conn)
 
 
 def handleFile(request: Request, conn: socket):
@@ -160,7 +178,6 @@ def handleFile(request: Request, conn: socket):
     write(make_data(respond), conn)
 
 
-# TODO and add auto range for big file
 def handleRange(request: Request, respond: Respond) -> Respond:
     class RangeException(Exception):
         pass
