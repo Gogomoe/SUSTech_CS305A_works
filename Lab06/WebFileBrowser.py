@@ -159,6 +159,8 @@ def handleFile(request: Request, conn: socket):
 
     respond: Respond = ((200, "OK"), {}, b'')
 
+    respond[1]['Accept-Ranges'] = 'bytes'
+    respond[1]['Server'] = 'GoHttp/0.6'
     respond[1]['Connection'] = 'close'
     respond[1]['Content-Type'] = mine_type
     respond[1]['Content-Length'] = str(file_size)
@@ -242,7 +244,7 @@ def handleRange(request: Request, respond: Respond) -> Respond:
 
 def make_data(respond: Respond) -> bytes:
     (status_code, status_str), header, body = respond
-    data = 'HTTP/1.0 {} {}\r\n'.format(str(status_code), status_str).encode('utf-8')
+    data = 'HTTP/1.1 {} {}\r\n'.format(str(status_code), status_str).encode('utf-8')
     for k, v in header.items():
         data += '{}: {}\r\n'.format(k, v).encode('utf-8')
     data += b'\r\n'
