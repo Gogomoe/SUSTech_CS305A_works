@@ -206,32 +206,25 @@ def handleRange(request: Request, respond: Respond) -> Respond:
         range = header['range']
         start_pos = range.index('=')
         end_pos = range.index('-')
-        if '-' == range[-1]:
-            range_from = int(range[start_pos + 1:end_pos])
-            if range_from < 0:
-                raise RangeException()
 
-            range_to = file_size - 1
+        range_from = int(range[start_pos + 1:end_pos])
+        range_to = file_size - 1
+
+        if '-' == range[-1]:
             if range_to - range_from + 1 > 4 * 1024 * 1024:
                 range_to = range_from + 4 * 1024 * 1024 - 1
-
-            respond_status = (206, 'Partial Content')
-            respond_header['Content-Range'] = 'bytes {}-{}/{}'.format(str(range_from), str(range_to),
-                                                                      str(file_size))
-            respond_header['Content-Length'] = str(range_to - range_from + 1)
-            body = body[range_from:range_to + 1]
-
         else:
-            range_from = int(range[start_pos + 1:end_pos])
             range_to = int(range[end_pos + 1:])
-            if range_from < 0 or range_from > range_to or range_to >= file_size:
-                raise RangeException()
+            range_to = min(file_size - 1, range_to)
 
-            respond_status = (206, 'Partial Content')
-            respond_header['Content-Range'] = 'bytes {}-{}/{}'.format(str(range_from), str(range_to),
-                                                                      str(file_size))
-            respond_header['Content-Length'] = str(range_to - range_from + 1)
-            body = body[range_from:range_to + 1]
+        if range_from < 0 or range_from > range_to:
+            raise RangeException()
+
+        respond_status = (206, 'Partial Content')
+        respond_header['Content-Range'] = 'bytes {}-{}/{}'.format(str(range_from), str(range_to),
+                                                                  str(file_size))
+        respond_header['Content-Length'] = str(range_to - range_from + 1)
+        body = body[range_from:range_to + 1]
 
     except RangeException:
         respond_status = (416, 'Requested Range Not Satisfiable')
