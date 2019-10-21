@@ -6,20 +6,6 @@ from urllib.parse import unquote
 from typing import Tuple, Any, List
 from typing import Dict
 
-err404 = [b'HTTP/1.0 404 Not Found\r\n'
-          b'Connection: close\r\n'
-          b'Content-Type:text/html; charset=utf-8\r\n'
-          b'\r\n'
-          b'<html><body>404 Not Found<body></html>\r\n'
-          b'\r\n'][0]
-
-err405 = [b'HTTP/1.0 405 Method Not Allowed\r\n'
-          b'Connection: close\r\n'
-          b'Content-Type:text/html; charset=utf-8\r\n'
-          b'\r\n'
-          b'<html><body>405 Method Not Allowed<body></html>\r\n'
-          b'\r\n'][0]
-
 # the root dir map to web page
 mappingDir = "../"
 
@@ -38,18 +24,39 @@ class Server(threading.Thread):
         request = decode_request(data)
         method, uri, query, header = request
 
-        if method != 'GET' and method != 'HEAD':
-            write(err405, self.conn)
-            return
-
         rel_uri = uri[1:] if uri[0] == '/' else uri
         path = os.path.join(mappingDir, unquote(rel_uri))
+
+        respond: Respond = ((200, "OK"), {}, b'')
+        respond[1]['Connection'] = 'close'
+        respond[1]['Server'] = 'GoHttp/0.6'
+
+        if method != 'GET' and method != 'HEAD':
+            respond = handle405(request, respond)
+            write(make_data(respond), self.conn)
+            return
         if not os.path.exists(path):
-            write(err404, self.conn)
-        elif os.path.isdir(path):
-            handleDir(request, self.conn)
+            respond = handle404(request, respond)
+            write(make_data(respond), self.conn)
+            return
+
+        respond = handle302(request, respond)
+        if request[0][0] == 302:
+            write(make_data(respond), self.conn)
+            return
+
+        if os.path.isdir(path):
+            respond = handleDir(request, respond)
         else:
-            handleFile(request, self.conn)
+            respond = handleFile(request, respond)
+
+        respond = handleRange(request, respond)
+
+        if method == 'HEAD':
+            write(make_data((respond[0], respond[1], b'')), self.conn)
+            return
+
+        write(make_data(respond), self.conn)
 
 
 def decode_request(data: bytes) -> Request:
@@ -80,40 +87,49 @@ def decode_request(data: bytes) -> Request:
     return method, uri, query, header
 
 
-def write(data: bytes, conn: socket.socket):
-    conn.send(data)
-    conn.close()
+def handle405(request, respond) -> Respond:
+    status = (405, 'Method Not Allowed')
+    body = b'<html><body>405 Method Not Allowed<body></html>'
+    return status, respond[1], body
 
 
-def handleDir(request: Request, conn: socket):
+def handle404(request, respond):
+    status = (404, 'Not Found')
+    body = b'<html><body>404 Not Found<body></html>'
+    return status, respond[1], body
+
+
+def handle302(request, respond):
+    method, uri, query, header = request
+
+    if not (uri == '/' and 'cookie' in header and 'referer' not in header):
+        return respond
+
+    cookie = header['cookie']
+    cookies = list(map(lambda it: it.strip(), cookie.split(';')))
+    cookies = list(map(lambda it: (it.split('=')[0], it.split('=')[1]), cookies))
+    visit_list: List[Tuple[str, str]] = list(filter(lambda it: it[0] == 'visit', cookies))
+
+    if len(visit_list) == 0:
+        return respond
+
+    visit: str = visit_list[0][1]
+    if visit == '/':
+        return respond
+
+    respond_status = (302, 'Found')
+    respond[1]['Location'] = visit
+    return respond_status, respond[1], b''
+
+
+def handleDir(request: Request, respond: Respond) -> Respond:
     method, uri, query, header = request
 
     rel_uri = uri[1:] if uri[0] == '/' else uri
     unquote_uri = unquote(rel_uri)
     path = os.path.join(mappingDir, unquote_uri)
 
-    respond: Respond = ((200, "OK"), {}, b'')
-
-    respond[1]['Connection'] = 'close'
     respond[1]['Content-Type'] = 'text/html; charset=utf-8'
-
-    if method == "HEAD":
-        write(make_data(respond), conn)
-        return
-
-    if uri == '/' and 'cookie' in header and 'referer' not in header:
-        cookie = header['cookie']
-        cookies = list(map(lambda it: it.strip(), cookie.split(';')))
-        cookies = list(map(lambda it: (it.split('=')[0], it.split('=')[1]), cookies))
-        visit_list: List[Tuple[str, str]] = list(filter(lambda it: it[0] == 'visit', cookies))
-        if len(visit_list) != 0:
-            visit: str = visit_list[0][1]
-            if visit != '/':
-                respond_status = (302, 'Found')
-                respond[1]['Location'] = visit
-                write(make_data((respond_status, respond[1], respond[2])), conn)
-                return
-
     respond[1]['Set-Cookie'] = 'visit={}; path=/'.format(uri)
 
     body = b''
@@ -136,48 +152,30 @@ def handleDir(request: Request, conn: socket):
     body += b'</pre><hr></body>\r\n'
     body += b'</html>\r\n'
 
-    respond = (respond[0], respond[1], body)
-
-    write(make_data(respond), conn)
+    return respond[0], respond[1], body
 
 
-def handleFile(request: Request, conn: socket):
+def handleFile(request: Request, respond: Respond) -> Respond:
     method, uri, query, header = request
 
     rel_uri = uri[1:] if uri[0] == '/' else uri
     unquote_uri = unquote(rel_uri)
     path = os.path.join(mappingDir, unquote_uri)
 
-    mine = MimeTypes()
-    guess = mine.guess_type(path)
-    if not guess:
-        mine_type = "application/octet-stream"
-    else:
-        mine_type, _ = guess
+    guess = MimeTypes().guess_type(path)
+    mine_type = guess[0] if guess else "application/octet-stream"
 
     file_size = os.path.getsize(path)
 
-    respond: Respond = ((200, "OK"), {}, b'')
-
     respond[1]['Accept-Ranges'] = 'bytes'
-    respond[1]['Server'] = 'GoHttp/0.6'
-    respond[1]['Connection'] = 'close'
     respond[1]['Content-Type'] = mine_type
     respond[1]['Content-Length'] = str(file_size)
-
-    if method == "HEAD":
-        write(make_data(respond), conn)
-        return
 
     file = open(path, 'rb')
     body = file.read()
     file.close()
 
-    respond = (respond[0], respond[1], body)
-
-    respond = handleRange(request, respond)
-
-    write(make_data(respond), conn)
+    return respond[0], respond[1], body
 
 
 def handleRange(request: Request, respond: Respond) -> Respond:
@@ -231,6 +229,11 @@ def make_data(respond: Respond) -> bytes:
     data += b'\r\n'
     data += body
     return data
+
+
+def write(data: bytes, conn: socket.socket):
+    conn.send(data)
+    conn.close()
 
 
 def web():
