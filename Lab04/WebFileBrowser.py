@@ -21,7 +21,7 @@ err405 = [b'HTTP/1.0 405 Method Not Allowed\r\n'
           b'\r\n'][0]
 
 # the root dir map to web page
-mappingDir = "C:/Users/gogo/OneDrive/Study/2019秋/计算机网络"
+mappingDir = "."
 
 
 async def dispatch(reader: StreamReader, writer: StreamWriter):

@@ -7,7 +7,7 @@ from typing import Tuple, Any, List
 from typing import Dict
 
 # the root dir map to web page
-mappingDir = "../"
+mappingDir = "."
 
 Request = Tuple[str, str, str, Dict[str, str]]
 Respond = Tuple[Tuple[int, str], Dict[str, str], bytes]
@@ -238,7 +238,7 @@ def write(data: bytes, conn: socket.socket):
 
 def web():
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.bind(('127.0.0.1', 8080))
+    sock.bind(('0.0.0.0', 8080))
     sock.listen(10)
     while True:
         conn, address = sock.accept()
