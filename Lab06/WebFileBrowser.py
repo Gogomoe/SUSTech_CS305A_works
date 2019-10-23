@@ -60,10 +60,15 @@ class Server(threading.Thread):
 
 
 def decode_request(data: bytes) -> Request:
-    data = data.decode().split('\r\n')
+    index = data.index(b'\r\n')
+    request_line = data[0:index].decode()
+
     method: str
     uri: str
-    method, uri, _ = data[0].split()
+    method, uri, _ = request_line.split()
+
+    print(request_line)
+    data = data[index + 2:]
 
     query: str = ''
     if '?' in uri:
@@ -72,16 +77,19 @@ def decode_request(data: bytes) -> Request:
         uri = uri[:index]
 
     header = {}
+    while True:
+        index = data.index(b'\r\n')
+        line = data[0:index].decode()
 
-    # print(data[0])
-    for line in data[1:]:
-        # print(line)
+        print(line)
+        data = data[index + 2:]
+
         if not line:
-            # when the line is empty, header is end
             break
-        index = line.index(":")
-        name: str = line[0: index]
-        value: str = line[index + 1:]
+
+        colon = line.index(":")
+        name: str = line[0: colon]
+        value: str = line[colon + 1:]
         header[name.strip().lower()] = value.strip()
 
     return method, uri, query, header
@@ -194,14 +202,19 @@ def handleRange(request: Request, respond: Respond) -> Respond:
         start_pos = range.index('=')
         end_pos = range.index('-')
 
-        range_from = int(range[start_pos + 1:end_pos])
+        range_from: int
         range_to: int
 
-        if '-' == range[-1]:
+        if '-' == range[start_pos + 1]:
+            range_from = file_size - int(range[end_pos + 1:])
             range_to = file_size - 1
         else:
-            range_to = int(range[end_pos + 1:])
-            range_to = min(file_size - 1, range_to)
+            range_from = int(range[start_pos + 1:end_pos])
+            if '-' == range[-1]:
+                range_to = file_size - 1
+            else:
+                range_to = int(range[end_pos + 1:])
+                range_to = min(file_size - 1, range_to)
 
         if range_from < 0 or range_from > range_to:
             raise RangeException()
