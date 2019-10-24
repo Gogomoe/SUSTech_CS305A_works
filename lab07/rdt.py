@@ -139,39 +139,29 @@ class socket(UDPsocket):
         self.unhandled_conns: Queue = Queue()
         self.connections: Dict[Address, Connection] = {}
 
-        self.client = None
-        self.socket = self
-        self.seq = 0
-        self.ack = 0
-        self.to_ack = 0
-        self.receive: Queue[Packet] = Queue()
-        self.sends: Queue[bytes] = Queue()
-        self.acks: Queue[Packet] = Queue()
-        self.message: Queue[Packet] = Queue()
-        self.machine = None
+        self.connection = None
 
     def connect(self, address: Tuple[str, int]):  # send syn; receive syn, ack; send ack    # your code here
         assert self.state == State.CLOSED
+
+        conn = Connection(address, self)
+        self.connection = conn
 
         def receive():
             while True:
                 try:
                     data, addr = self.recvfrom(10 * 1024 * 1024)
                     packet = Packet.from_bytes(data)
-                    self.on_recv_packet(packet)
+                    conn.on_recv_packet(packet)
                 except:
                     pass
 
         self.receiver = Thread(target=receive)
         self.receiver.start()
 
-        self.machine = StateMachine(self)
-        self.machine.start()
-
-        self.client = address
-        self.state = State.SYN_SENT
-        self.send_packet(Packet.create(self.seq, self.ack, b'\xAC', SYN=True))
-        self.state = State.ESTABLISHED
+        conn.state = State.SYN_SENT
+        conn.send_packet(Packet.create(conn.seq, conn.ack, b'\xAC', SYN=True))
+        conn.state = State.ESTABLISHED
 
     def accept(self):  # receive syn; send syn, ack; receive ack    # your code here
         assert self.state in (State.CLOSED, State.LISTEN)
@@ -199,39 +189,12 @@ class socket(UDPsocket):
         return conn, conn.client
 
     def recv(self, bufsize: int, flags: int = ...) -> bytes:
-        return self.message.get().payload
+        assert self.connection
+        return self.connection.recv(bufsize, flags)
 
     def send(self, data: bytes, flags: int = ...) -> int:
-        assert self.state == State.ESTABLISHED
-        print("push", len(data), "bytes")
-        self.sends.put(data)
-        return len(data)
+        assert self.connection
+        return self.connection.send(data, flags)
 
     def close(self) -> None:
         pass
-
-    def send_packet(self, packet: Packet):
-
-        success = [False]
-
-        @time_limited(1)
-        def transmit():
-            t = currentThread()
-            self.to_ack = self.seq + packet.LEN
-            self.socket.sendto(packet.to_bytes(), self.client)
-            while t.alive:
-                ack = self.acks.get()
-                if ack.ack >= self.to_ack:
-                    success[0] = True
-                    break
-
-        while not success[0]:
-            try:
-                transmit()
-            except:
-                print("retransmit", packet)
-
-    def on_recv_packet(self, packet: Packet):
-        self.receive.put(packet)
-        if packet.ACK:
-            self.acks.put(packet)
