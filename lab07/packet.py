@@ -84,23 +84,25 @@ class Packet:
         return (65536 - sum) % 65536
 
     def __str__(self) -> str:
-        res = "["
+        res = ""
 
+        if self.SYN:
+            res += "\033[94mSYN\033[0m "
+        if self.ACK:
+            res += "\033[93mACK\033[0m "
+        if self.FIN:
+            res += "FIN "
+
+        res += "["
         res += "seq={}, ".format(self.seq)
         res += "ack={}, ".format(self.ack)
 
-        if self.SYN:
-            res += "SYN, "
-        if self.ACK:
-            res += "ACK, "
-        if self.FIN:
-            res += "FIN, "
-
-        res += "Len={}, ".format(self.LEN)
-
-        res += "] "
         if self.LEN != 0:
+            res += "Len={}, ".format(self.LEN)
+            res += "] "
             res += str(self.payload)
+        else:
+            res += "] "
 
         return res
 
