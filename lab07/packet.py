@@ -91,7 +91,7 @@ class Packet:
         if self.ACK:
             res += "\033[93mACK\033[0m "
         if self.FIN:
-            res += "FIN "
+            res += "\033[91mFIN\033[0m "
 
         res += "["
         res += "seq={}, ".format(self.seq)

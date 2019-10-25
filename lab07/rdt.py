@@ -18,6 +18,11 @@ class State(Enum):
     SYN_SENT = auto()
     SYN_RCVD = auto()
     ESTABLISHED = auto()
+    FIN_WAIT_1 = auto()
+    FIN_WAIT_2 = auto()
+    TIME_WAIT = auto()
+    CLOSE_WAIT = auto()
+    LAST_ACK = auto()
 
 
 class StateMachine(Thread):
@@ -31,26 +36,37 @@ class StateMachine(Thread):
 
         no_packet = 0
         while True:
-            retransmit = []
             now = datetime.now().timestamp()
-            for packet, send_time in conn.sending:
+
+            sending = conn.sending
+            conn.sending = []
+            for packet, send_time in sending:
                 if conn.seq >= packet.seq + packet.LEN:
                     continue
                 if now - send_time >= 1.0:
                     print(conn.state, "retransmit ", end='')
                     conn.send_packet(packet)
-                    retransmit.append((packet, now))
                 else:
-                    retransmit.append((packet, send_time))
+                    conn.sending.append((packet, send_time))
 
-            conn.sending = retransmit
+            # close
+            if conn.state == State.TIME_WAIT and no_packet >= 6:
+                conn.state = State.CLOSED
+                print(conn.state)
+                # TODO close
 
+            # send data
             if len(conn.receive.queue) == 0 and len(conn.sends.queue) != 0 and \
-                    len(conn.sending) == 0 and no_packet >= 3 and conn.state == State.ESTABLISHED:
+                    len(conn.sending) == 0 and no_packet >= 3 and conn.state in (State.ESTABLISHED, State.FIN_WAIT_1):
                 data = conn.sends.get()
-                print(conn.state, "send", end='')
-                conn.send_packet(Packet.create(conn.seq, conn.ack, data))
+                if isinstance(data, Packet):
+                    to_send = Packet.create(conn.seq, conn.ack, data.payload, SYN=data.SYN, ACK=data.ACK, FIN=data.FIN)
+                else:
+                    to_send = Packet.create(conn.seq, conn.ack, data)
+                print(conn.state, "send ", end='')
+                conn.send_packet(to_send)
 
+            # receive date
             packet: Packet
             try:
                 packet = conn.receive.get(timeout=0.5)
@@ -61,7 +77,7 @@ class StateMachine(Thread):
 
             print(conn.state, "recv", packet)
 
-            if packet.seq < conn.ack:
+            if packet.LEN != 0 and packet.seq < conn.ack:
                 print(conn.state, "resend ", end='')
                 conn.send_packet(Packet.create(conn.seq, conn.ack, ACK=True))
                 continue
@@ -69,6 +85,9 @@ class StateMachine(Thread):
                 conn.seq = max(conn.seq, packet.ack)
             if packet.LEN != 0:
                 conn.ack = max(conn.ack, packet.seq + packet.LEN)
+
+            not_arrive = [it for (it, send_time) in conn.sending if conn.seq < it.seq + it.LEN]
+            all_packet_arrive = len(conn.sends.queue) == 0 and len(not_arrive) == 0
 
             if conn.state == State.CLOSED and packet.SYN:
                 conn.state = State.SYN_RCVD
@@ -81,13 +100,36 @@ class StateMachine(Thread):
             elif conn.state == State.SYN_RCVD and packet.ACK:
                 assert packet.ack == 1
                 conn.state = State.ESTABLISHED
+            # close
+            elif conn.state == State.ESTABLISHED and packet.FIN:
+                conn.send_packet(Packet.create(conn.seq, conn.ack, ACK=True))
+                conn.state = State.CLOSE_WAIT
+                if all_packet_arrive:
+                    conn.send_packet(Packet.create(conn.seq, conn.ack, b'\xAF', FIN=True, ACK=True))
+                    conn.state = State.LAST_ACK
+            elif conn.state == State.FIN_WAIT_1 and all_packet_arrive:
+                conn.state = State.FIN_WAIT_2
+                if packet.FIN and packet.ACK:
+                    conn.send_packet(Packet.create(conn.seq, conn.ack, ACK=True))
+                    conn.state = State.TIME_WAIT
+            elif conn.state == State.CLOSE_WAIT and all_packet_arrive:
+                conn.send_packet(Packet.create(conn.seq, conn.ack, b'\xAF', FIN=True, ACK=True))
+                conn.state = State.LAST_ACK
+            elif conn.state in (State.FIN_WAIT_1, State.FIN_WAIT_2) and packet.FIN and packet.ACK:
+                conn.send_packet(Packet.create(conn.seq, conn.ack, ACK=True))
+                conn.state = State.TIME_WAIT
+            elif conn.state == State.LAST_ACK and packet.ACK:
+                conn.state = State.CLOSED
+                print(conn.state)
+                # TODO close socket and thread
+
             elif packet.LEN != 0:
                 conn.message.put(packet)
                 print(conn.state, "send ", end='')
                 conn.send_packet(Packet.create(conn.seq, conn.ack, ACK=True))
 
 
-class Connection():
+class Connection:
     def __init__(self, client: Address, socket):
         self.client = client
         self.socket = socket
@@ -106,12 +148,17 @@ class Connection():
         return self.message.get().payload
 
     def send(self, data: bytes, flags: int = ...) -> int:
+        assert self.state not in (State.CLOSED, State.LISTEN,
+                                  State.FIN_WAIT_1, State.FIN_WAIT_2, State.CLOSE_WAIT,
+                                  State.TIME_WAIT, State.LAST_ACK)
         print("push", len(data), "bytes")
         self.sends.put(data)
         return len(data)
 
     def close(self) -> None:
-        pass
+        assert self.state in (State.SYN_RCVD, State.ESTABLISHED)
+        self.sends.put(Packet.create(data=b'\xAF', FIN=True))
+        self.state = State.FIN_WAIT_1
 
     def send_packet(self, packet: Packet):
         print(packet)
@@ -189,4 +236,10 @@ class socket(UDPsocket):
         return self.connection.send(data, flags)
 
     def close(self) -> None:
-        pass
+        if self.connection:  # client
+            self.connection.close()
+        elif self.connections:  # server
+            # TODO
+            pass
+        else:
+            raise Exception("Illegal state")
