@@ -29,13 +29,14 @@ class StateMachine(Thread):
     def __init__(self, conn):
         Thread.__init__(self)
         self.conn: Connection = conn
+        self.alive = True
 
     def run(self):
         conn = self.conn
         socket = conn.socket
 
         no_packet = 0
-        while True:
+        while self.alive:
             now = datetime.now().timestamp()
 
             sending = conn.sending
@@ -53,7 +54,7 @@ class StateMachine(Thread):
             if conn.state == State.TIME_WAIT and no_packet >= 6:
                 conn.state = State.CLOSED
                 print(conn.state)
-                # TODO close
+                conn.close_connection()
 
             # send data
             if len(conn.receive.queue) == 0 and len(conn.sends.queue) != 0 and \
@@ -121,7 +122,7 @@ class StateMachine(Thread):
             elif conn.state == State.LAST_ACK and packet.ACK:
                 conn.state = State.CLOSED
                 print(conn.state)
-                # TODO close socket and thread
+                conn.close_connection()
 
             elif packet.LEN != 0:
                 conn.message.put(packet)
@@ -133,6 +134,7 @@ class Connection:
     def __init__(self, client: Address, socket):
         self.client = client
         self.socket = socket
+        self.receive_data = True
         self.state = State.CLOSED
         self.seq = 0
         self.ack = 0
@@ -168,6 +170,11 @@ class Connection:
     def on_recv_packet(self, packet: Packet):
         self.receive.put(packet)
 
+    def close_connection(self):
+        self.machine.alive = False
+        self.receive_data = False
+        self.socket._close_connection(self)
+
 
 # import provided class
 class socket(UDPsocket):
@@ -188,7 +195,7 @@ class socket(UDPsocket):
         self.connection = conn
 
         def receive():
-            while True:
+            while conn.receive_data:
                 try:
                     data, addr = self.recvfrom(10 * 1024 * 1024)
                     packet = Packet.from_bytes(data)
@@ -239,7 +246,18 @@ class socket(UDPsocket):
         if self.connection:  # client
             self.connection.close()
         elif self.connections:  # server
-            # TODO
-            pass
+            for conn in self.connections.values():
+                conn.close()
+            self.state = State.CLOSED
+        else:
+            raise Exception("Illegal state")
+
+    def _close_connection(self, conn) -> None:
+        if self.connection:  # client
+            UDPsocket.close(self)
+        elif self.connections:  # server
+            del self.connections[conn.client]
+            if self.state == State.CLOSED and len(self.connections) == 0:
+                UDPsocket.close(self)
         else:
             raise Exception("Illegal state")
