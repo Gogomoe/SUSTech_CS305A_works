@@ -6,8 +6,6 @@ from typing import Tuple, List, Dict
 from packet import Packet
 
 from udp import UDPsocket
-import socket as sock
-from time_limit import time_limited
 
 Address = Tuple[str, int]
 
@@ -81,6 +79,9 @@ class StateMachine(Thread):
             if packet.LEN != 0 and packet.seq < conn.ack:
                 print(conn.state, "resend ", end='')
                 conn.send_packet(Packet.create(conn.seq, conn.ack, ACK=True))
+                continue
+            if packet.LEN != 0 and packet.seq > conn.ack:
+                print(conn.state, "unordered ", packet)
                 continue
             if packet.ACK:
                 conn.seq = max(conn.seq, packet.ack)
